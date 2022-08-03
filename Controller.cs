@@ -1,5 +1,7 @@
+using Azure.Data.Tables;
+using isds_oauth2_proxy.Extensions;
+using isds_oauth2_proxy.Model;
 using isds_oauth2_proxy.Services;
-using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.WebJobs;
@@ -18,13 +20,11 @@ namespace isds_oauth2_proxy
 {
     public class Controller
     {
-        private readonly IDataProtector _protector;
         private readonly IConfiguration _configuration;
         private readonly ISDS.GetCredential.EndSessionClient _getCredentialService;
         private readonly JwtTokenService _jwtTokenService;
-        public Controller(IDataProtectionProvider provider, IConfiguration configuration, JwtTokenService jwtTokenService)
+        public Controller(IConfiguration configuration, JwtTokenService jwtTokenService)
         {
-            _protector = provider.CreateProtector("isds_oauth2_proxy");
             _configuration = configuration;
 
             _getCredentialService = new ISDS.GetCredential.EndSessionClient();
@@ -32,36 +32,43 @@ namespace isds_oauth2_proxy
 
             _jwtTokenService = jwtTokenService;
         }
-
         [FunctionName("Authorize")]
-        public async Task<IActionResult> Authorize([HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "oauth2/authorize")] HttpRequest req, ILogger log)
+        public async Task<IActionResult> Authorize(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "oauth2/authorize")] HttpRequest req,
+            [Table("RedirectUrlCache")] TableClient cloudTable,
+            ILogger log)
         {
             var query = req.QueryString.ToUriComponent();
-            var encryptedQuery = _protector.Protect(query);
 
-            return new RedirectResult($"https://www.mojedatovaschranka.cz/as/login?atsId={_configuration["ISDS:atsId"]}&appToken={encryptedQuery}");
+            var rng = new Random();
+            var id = rng.NextULong(1000000000000000, 9999999999999999999);
+
+            await cloudTable.UpsertEntityAsync(new IsdsRedirectState()
+            {
+                PartitionKey = "state",
+                RowKey = id.ToString(),
+                State = query
+            }, TableUpdateMode.Replace);
+
+            return new RedirectResult($"https://www.mojedatovaschranka.cz/as/login?atsId={_configuration["ISDS:atsId"]}&appToken={id}");
         }
         [FunctionName("AuthResp")]
-        public async Task<IActionResult> AuthResp([HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "isds/authresp")] HttpRequest req, ILogger log)
+        public async Task<IActionResult> AuthResp(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "isds/authresp")] HttpRequest req,
+            [Table("RedirectUrlCache")] TableClient cloudTable,
+            ILogger log)
         {
             var sessionId = req.Query["sessionId"];
+            var id = req.Query["appToken"];
+
             var response = await _getCredentialService.authConfirmationAsync(new ISDS.GetCredential.authConfirmationRequestType
             {
                 sessionId = sessionId
             });
 
-            string query;
+            var tableResponse = await cloudTable.GetEntityAsync<IsdsRedirectState>("state", id);
 
-            try
-            {
-                query = _protector.Unprotect(response.authConfirmationResponse1.attributes.Where(x => x.name == "appToken").First().value);
-            }
-            catch (Exception ex)
-            {
-                log.LogWarning($"Failed to obtain and unprotect appToken from authConfirmationResponse, falling back to query. Token in authResponse: {response.authConfirmationResponse1.attributes.Where(x => x.name == "appToken").First().value}, token in query: {req.Query["appToken"]}");
-                query = _protector.Unprotect(req.Query["appToken"]);
-            }
-            var parsedQuery = HttpUtility.ParseQueryString(query);
+            var parsedQuery = HttpUtility.ParseQueryString(tableResponse.Value.State);
 
             var token = _jwtTokenService.GenerateToken(new Claim[]
             {
@@ -74,6 +81,8 @@ namespace isds_oauth2_proxy
             });
 
             var redirectUrl = $"{parsedQuery["redirect_uri"]}?code={token}&state={parsedQuery["state"]}";
+
+            await cloudTable.DeleteEntityAsync("state", id);
 
             //return new OkObjectResult(new { query = parsedQuery, attributes = response.authConfirmationResponse1.attributes, redirectUrl = redirectUrl });
             return new RedirectResult(redirectUrl);
