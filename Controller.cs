@@ -22,8 +22,7 @@ namespace isds_oauth2_proxy
         private readonly IConfiguration _configuration;
         private readonly ISDS.GetCredential.EndSessionClient _getCredentialService;
         private readonly JwtTokenService _jwtTokenService;
-        private readonly ILogger _logger;
-        public Controller(IDataProtectionProvider provider, IConfiguration configuration, JwtTokenService jwtTokenService, ILogger logger)
+        public Controller(IDataProtectionProvider provider, IConfiguration configuration, JwtTokenService jwtTokenService)
         {
             _protector = provider.CreateProtector("isds_oauth2_proxy");
             _configuration = configuration;
@@ -32,8 +31,6 @@ namespace isds_oauth2_proxy
             _getCredentialService.ClientCredentials.ClientCertificate.SetCertificate(StoreLocation.CurrentUser, StoreName.My, X509FindType.FindBySubjectName, _configuration["ISDS:CertificateSubject"]);
 
             _jwtTokenService = jwtTokenService;
-
-            _logger = logger;
         }
 
         [FunctionName("Authorize")]
@@ -61,7 +58,7 @@ namespace isds_oauth2_proxy
             }
             catch (Exception ex)
             {
-                _logger.LogWarning($"Failed to obtain and unprotect appToken from authConfirmationResponse, falling back to query. Token in authResponse: {response.authConfirmationResponse1.attributes.Where(x => x.name == "appToken").First().value}, token in query: {req.Query["appToken"]}");
+                log.LogWarning($"Failed to obtain and unprotect appToken from authConfirmationResponse, falling back to query. Token in authResponse: {response.authConfirmationResponse1.attributes.Where(x => x.name == "appToken").First().value}, token in query: {req.Query["appToken"]}");
                 query = _protector.Unprotect(req.Query["appToken"]);
             }
             var parsedQuery = HttpUtility.ParseQueryString(query);
