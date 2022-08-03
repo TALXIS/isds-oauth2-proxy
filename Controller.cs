@@ -6,6 +6,7 @@ using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Claims;
@@ -21,7 +22,8 @@ namespace isds_oauth2_proxy
         private readonly IConfiguration _configuration;
         private readonly ISDS.GetCredential.EndSessionClient _getCredentialService;
         private readonly JwtTokenService _jwtTokenService;
-        public Controller(IDataProtectionProvider provider, IConfiguration configuration, JwtTokenService jwtTokenService)
+        private readonly ILogger _logger;
+        public Controller(IDataProtectionProvider provider, IConfiguration configuration, JwtTokenService jwtTokenService, ILogger logger)
         {
             _protector = provider.CreateProtector("isds_oauth2_proxy");
             _configuration = configuration;
@@ -30,6 +32,8 @@ namespace isds_oauth2_proxy
             _getCredentialService.ClientCredentials.ClientCertificate.SetCertificate(StoreLocation.CurrentUser, StoreName.My, X509FindType.FindBySubjectName, _configuration["ISDS:CertificateSubject"]);
 
             _jwtTokenService = jwtTokenService;
+
+            _logger = logger;
         }
 
         [FunctionName("Authorize")]
@@ -49,7 +53,17 @@ namespace isds_oauth2_proxy
                 sessionId = sessionId
             });
 
-            var query = _protector.Unprotect(response.authConfirmationResponse1.attributes.Where(x => x.name == "appToken").First().value);
+            string query;
+
+            try
+            {
+                query = _protector.Unprotect(response.authConfirmationResponse1.attributes.Where(x => x.name == "appToken").First().value);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning($"Failed to obtain and unprotect appToken from authConfirmationResponse, falling back to query. Token in authResponse: {response.authConfirmationResponse1.attributes.Where(x => x.name == "appToken").First().value}, token in query: {req.Query["appToken"]}");
+                query = _protector.Unprotect(req.Query["appToken"]);
+            }
             var parsedQuery = HttpUtility.ParseQueryString(query);
 
             var token = _jwtTokenService.GenerateToken(new Claim[]
